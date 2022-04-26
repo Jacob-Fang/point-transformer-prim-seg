@@ -1,0 +1,38 @@
+# data parameters
+DATA:
+  data_name: ABC
+  data_root: dataset/abc_final
+  train_dataset: train_data.txt
+  test_dataset: test_data.txt
+  train_skip: 1
+  test_skip: 100
+  train_fold: 1
+  augment: 0
+  if_normal_noise: 0
+
+
+
+
+TRAIN:
+  arch: pointtransformer_primitive_seg_repro
+  train_gpu: [0,1,2,3]
+  manual_seed: 7777
+  sync_bn: False
+  workers: 16  # data loader workers
+  batch_size: 16  # batch size for training
+  batch_size_val: 2  # batch size for validation during training, memory and speed tradeoff
+  base_lr: 0.5
+  epochs: 100
+  start_epoch: 0
+  momentum: 0.9
+  weight_decay: 0.0001
+  save_path:
+  weight:  # path to initial weight (default: none)
+  resume:  # path to latest checkpoint (default: none)
+
+Distributed:
+  dist_url: tcp://localhost:8888
+  dist_backend: 'nccl'
+  multiprocessing_distributed: True
+  world_size: 1 #分布式主机数量
+  rank: 0
