@@ -23,6 +23,10 @@ from util.s3dis import S3DIS
 from util.common_util import AverageMeter, intersectionAndUnionGPU, find_free_port
 from util.data_util import collate_fn
 from util import transform as t
+from util.loss_utils import compute_embedding_loss, compute_normal_loss, \
+        compute_param_loss, compute_nnl_loss, compute_miou, compute_type_miou_abc, npy
+from util.abc_utils import mean_shift, compute_entropy, construction_affinity_matrix_type, \
+        construction_affinity_matrix_normal
 
 
 def get_parser():
@@ -108,7 +112,7 @@ def main_worker(gpu, ngpus_per_node, argss):
     if args.arch == 'pointtransformer_seg_repro':
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
     elif args.arch == 'pointtransformer_primitive_seg_repro':
-        from model.pointtransformer.pointtransformer_primitive_seg import pointtransformer_primitive_seg_repro as Model
+        from model.pointtransformer.pointtransformer_primitive_seg import PointTransformerSeg as Model
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
     model = Model(c=args.fea_dim, k=args.classes)
@@ -231,6 +235,111 @@ def main_worker(gpu, ngpus_per_node, argss):
         writer.close()
         logger.info('==>Training done!\nBest Iou: %.3f' % (best_iou))
 
+def process_batch(batch_data_label, model, args, postprocess=False):
+
+    inputs_xyz_th = (batch_data_label['gt_pc']).float().cuda(non_blocking=True).permute(0,2,1)
+    inputs_n_th = (batch_data_label['gt_normal']).float().cuda(non_blocking=True).permute(0,2,1)
+
+    batch_size, N, _ = inputs_xyz_th.shape
+    l = np.arange(N)
+    if postprocess:
+        np.random.seed(1234)
+    np.random.shuffle(l)
+    random_index = torch.from_numpy(l[:7000])
+    
+    points = torch.cat([inputs_n_th, inputs_xyz_th], dim=-1)
+    subidx = random_index.to(points.device).long().view(1,1,-1).repeat(batch_size,1,1)
+    points = torch.gather(points.permute(0, 2, 1), -1, subidx.repeat(1,6,1)) # [b, 6, n_sub]
+    
+    affinity_feat, type_per_point, param_per_point = model([inputs_xyz_th, points], postprocess=postprocess)
+
+    sub_idx = subidx.squeeze(1)
+    inputs_xyz_sub = torch.gather(inputs_xyz_th, -1, sub_idx.unsqueeze(1).repeat(1,3,1))
+    N_gt = (batch_data_label['gt_normal']).float().cuda(non_blocking=True)
+    N_gt = torch.gather(N_gt, 1, sub_idx.unsqueeze(-1).repeat(1,1,3))
+    I_gt = torch.gather(batch_data_label['I_gt'], -1, sub_idx)
+    T_gt = torch.gather(batch_data_label['T_gt'], -1, sub_idx)
+
+    loss_dict = {}
+        
+    if 'f' in args.loss_class:
+        # network feature loss
+        feat_loss, pull_loss, push_loss = compute_embedding_loss(affinity_feat, I_gt)
+        loss_dict['feat_loss'] = feat_loss
+    # if 'n' in args.loss_class:
+    #     # normal angle loss
+    #     normal_loss = compute_normal_loss(normal_per_point, N_gt)
+    #     loss_dict['normal_loss'] = args.normal_weight * normal_loss
+    if 'p' in args.loss_class:
+        T_param_gt = torch.gather(batch_data_label['T_param'], 1, sub_idx.unsqueeze(-1).repeat(1,1,22))
+        # parameter loss
+        param_loss = compute_param_loss(param_per_point, T_gt, T_param_gt)
+        loss_dict['param_loss'] = args.param_weight * param_loss
+    if 'r' in args.loss_class:
+        # primitive nnl loss
+        type_loss = compute_nnl_loss(type_per_point, T_gt)
+        loss_dict['nnl_loss'] = args.type_weight * type_loss
+
+    total_loss = 0
+    for key in loss_dict:
+        if 'loss' in key:
+            total_loss += loss_dict[key]
+
+    if postprocess:
+            
+        affinity_matrix = construction_affinity_matrix_type(inputs_xyz_sub, type_per_point, param_per_point, args.sigma)
+        
+        affinity_matrix_normal = construction_affinity_matrix_normal(inputs_xyz_sub, N_gt, sigma=args.normal_sigma, knn=args.edge_knn) 
+
+        obj_idx = batch_data_label['index'][0]
+            
+        spec_embedding_list = []
+        weight_ent = []
+
+        # use network feature
+        feat_ent = args.feat_ent_weight - float(npy(compute_entropy(affinity_feat)))
+        weight_ent.append(feat_ent)
+        spec_embedding_list.append(affinity_feat)
+        
+        # use geometry distance feature
+        topk = args.topK            
+        # 求对称正定义广义特征值问题的k个最大或最小特征值以及对应特征向量
+        e, v = torch.lobpcg(affinity_matrix, k=topk, niter=10)
+        v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
+
+        dis_ent = args.dis_ent_weight - float(npy(compute_entropy(v)))
+        
+        weight_ent.append(dis_ent)
+        spec_embedding_list.append(v)
+            
+        # use edge feature
+        edge_topk = args.edge_topK
+        e, v = torch.lobpcg(affinity_matrix_normal, k=edge_topk, niter=10)
+        v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
+        
+        edge_ent = args.edge_ent_weight - float(npy(compute_entropy(v)))
+        
+        weight_ent.append(edge_ent)
+        spec_embedding_list.append(v)
+
+        
+        
+        # combine features
+        weighted_list = []
+        norm_weight_ent = weight_ent / np.linalg.norm(weight_ent)
+        for i in range(len(spec_embedding_list)):
+            weighted_list.append(spec_embedding_list[i] * weight_ent[i])
+
+        spectral_embedding = torch.cat(weighted_list, dim=-1)
+        
+        spec_cluster_pred = mean_shift(spectral_embedding, bandwidth=args.bandwidth)
+        cluster_pred = spec_cluster_pred
+        miou = compute_miou(spec_cluster_pred, I_gt)
+        loss_dict['miou'] = miou
+        miou = compute_type_miou_abc(type_per_point, T_gt, cluster_pred, I_gt)
+        loss_dict['type_miou'] = miou
+
+    return total_loss, loss_dict
 
 def train(train_loader, model, criterion, optimizer, epoch):
     batch_time = AverageMeter()
@@ -243,6 +352,21 @@ def train(train_loader, model, criterion, optimizer, epoch):
     model.train()
     end = time.time()
     max_iter = args.epochs * len(train_loader)
+    for batch_idx, batch_data_label in enumerate(train_loader):
+        data_time.update(time.time() - end)
+        for key in batch_data_label:
+            if not isinstance(batch_data_label[key], list):
+                batch_data_label[key] = batch_data_label[key].cuda(non_blocking=True)
+        optimizer.zero_grad()
+
+        with torch.autograd.set_detect_anomaly(True):
+            total_loss, loss_dict = process_batch(batch_data_label, model, args)
+
+            total_loss.backward()
+        
+        optimizer.step()
+
+
     for i, (coord, feat, target, offset) in enumerate(train_loader):  # (n, 3), (n, c), (n), (b)
         data_time.update(time.time() - end)
         coord, feat, target, offset = coord.cuda(non_blocking=True), feat.cuda(non_blocking=True), target.cuda(non_blocking=True), offset.cuda(non_blocking=True)

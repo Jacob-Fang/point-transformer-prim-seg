@@ -9,6 +9,7 @@ DATA:
   train_fold: 1
   augment: 0
   if_normal_noise: 0
+  fea_dim: 6  # point feature dimension
 
 
 
