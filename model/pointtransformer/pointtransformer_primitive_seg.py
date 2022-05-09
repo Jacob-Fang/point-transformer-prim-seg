@@ -12,19 +12,13 @@ from model.pointtransformer.point_transformer_modules import (
 
 class PointTransformerSeg(nn.Module):
     
-    def __init__(self, c=6, k=16, emb_size=128, num_primitives=10, primitives=True, embedding=True, parameters=True, args=None):
+    def __init__(self, c=6, k=16, emb_size=128, num_primitives=10, primitives=True, embedding=True, param=True, args=None):
         super(PointTransformerSeg, self).__init__()
         
         self.nsamples = args.get('nsamples', [8, 16, 16, 16, 16])
         self.strides = args.get('strides', [None, 4, 4, 4, 4])
         self.planes = args.get('planes', [32, 64, 128, 256, 512])
         self.blocks = args.get('blocks', [2, 3, 4, 6, 3])
-
-        self.emb_size = emb_size
-        self.num_primitives = num_primitives
-        self._parameters = parameters
-        self.primitives = primitives
-        self.embedding = embedding
         
         # encoder
         self.in_mlp = nn.Sequential(
@@ -63,14 +57,21 @@ class PointTransformerSeg(nn.Module):
         self.dec_layer2 = self._make_layer(self.planes[1], 2, nsample=self.nsamples[1])
         self.up2to1 = TransitionUp(self.planes[1], self.planes[0], self.planes[0])
         self.dec_layer1 = self._make_layer(self.planes[0], 2, nsample=self.nsamples[0])
-        # self.out_mlp = nn.Sequential(
-        #     nn.Conv1d(self.planes[0], self.planes[0], kernel_size=1, bias=False),
-        #     nn.BatchNorm1d(self.planes[0]),
-        #     nn.ReLU(inplace=True),
-        #     nn.Conv1d(self.planes[0], k, kernel_size=1)
-        # )
+        self.out_mlp = nn.Sequential(
+            nn.Conv1d(self.planes[0], self.planes[0], kernel_size=1, bias=False),
+            nn.BatchNorm1d(self.planes[0]),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(self.planes[0], k, kernel_size=1)
+        )
 
-        if embedding:
+        self.logsoftmax = torch.nn.LogSoftmax(dim=1)
+        self.emb_size = emb_size
+        self.num_primitives = num_primitives
+        self.primitives = primitives
+        self.embedding = embedding
+        self.param = param
+        
+        if self.embedding:
             self.out_mlp_emb = nn.Sequential(
                 nn.Conv1d(self.planes[0], self.planes[0], kernel_size=1, bias=False),
                 nn.BatchNorm1d(self.planes[0]),
@@ -84,7 +85,7 @@ class PointTransformerSeg(nn.Module):
                 nn.ReLU(inplace=True),
                 nn.Conv1d(self.planes[0], self.num_primitives, kernel_size=1)
             )
-        if parameters:
+        if param:
             self.out_mlp_param = nn.Sequential(
                 nn.Conv1d(self.planes[0], self.planes[0], kernel_size=1, bias=False),
                 nn.BatchNorm1d(self.planes[0]),
@@ -133,13 +134,14 @@ class PointTransformerSeg(nn.Module):
         # return y
 
         if self.embedding:
-            embedding = self.out_mlp_emb(y)
+            embedding = self.out_mlp_emb(y).permute(0, 2, 1)
         
         if self.primitives:
             type_per_point = self.out_mlp_prim(y)
+            type_per_point = self.logsoftmax(type_per_point).permute(0, 2, 1)
 
-        if self._parameters:
-            param_per_point = self.out_mlp_param(y)
+        if self.param:
+            param_per_point = self.out_mlp_param(y).transpose(1, 2)
             sphere_param = param_per_point[:, :, :4]
             plane_norm = torch.norm(param_per_point[:, :, 4:7], dim=-1, keepdim=True).repeat(1, 1, 3) + 1e-12
             plane_normal = param_per_point[:, :, 4:7] / plane_norm

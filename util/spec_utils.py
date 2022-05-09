@@ -148,7 +148,8 @@ def pca_torch(X):
     # TODO 2Change this to do SVD, because it is stable and computationally
     # less intensive.
     covariance = torch.transpose(X, 1, 0) @ X
-    S, U = torch.eig(covariance, eigenvectors=True)
+    # S, U = torch.eig(covariance, eigenvectors=True)
+    S, U = torch.linalg.eig(covariance)
     return S, U
 
 def rotation_matrix_a_to_b(A, B):
