@@ -38,6 +38,8 @@ class ABCDataset(data.Dataset):
         self.data_list = self.data_list[::self.skip]
         self.tru_len = len(self.data_list)
         self.len = self.tru_len * fold
+
+        del self.data_path
     
     def __getitem__(self, index):
 
@@ -52,6 +54,7 @@ class ABCDataset(data.Dataset):
             normals = np.array(hf.get("normals"))
             primitives = np.array(hf.get("prim"))
             primitive_param = np.array(hf.get("T_param"))
+        del hf
         
         if self.augment:
             points = self.augment_routines[np.random.choice(np.arange(5))](points[None,:,:])[0]

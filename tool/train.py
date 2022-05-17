@@ -113,6 +113,7 @@ def main_worker(gpu, ngpus_per_node, argss):
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
     elif args.arch == 'pointtransformer_primitive_seg_repro':
         from model.pointtransformer.pointtransformer_primitive_seg import PointTransformerSeg as Model
+        # from model.pointtransformer.dgcnn_transformer import PointTransformer_PrimSeg as Model
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
     # model = Model(c=args.fea_dim, k=args.classes)
@@ -121,9 +122,9 @@ def main_worker(gpu, ngpus_per_node, argss):
        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     # criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda()
 
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    # optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.6), int(args.epochs*0.8)], gamma=0.1) # decay lr by 10% when epoch is 60% and 80% of epochs
+    # optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.2),int(args.epochs*0.4), int(args.epochs*0.6),int(args.epochs*0.8)], gamma=0.1) # decay lr by 10% when epoch is 60% and 80% of epochs
 
     if main_process():
         global logger, writer
@@ -199,7 +200,8 @@ def main_worker(gpu, ngpus_per_node, argss):
 
     if args.is_test == True:
         miou = validate(val_loader, model, 1)
-        logger.info('Test IoU: {:.4f}'.format(miou))
+        if main_process():
+            logger.info('Test IoU: {:.4f}'.format(miou))
     else:
         for epoch in range(args.start_epoch, args.epochs):
             if args.distributed:
@@ -213,6 +215,7 @@ def main_worker(gpu, ngpus_per_node, argss):
             #     writer.add_scalar('mIoU_train', mIoU_train, epoch_log)
             #     writer.add_scalar('mAcc_train', mAcc_train, epoch_log)
             #     writer.add_scalar('allAcc_train', allAcc_train, epoch_log)
+            torch.cuda.empty_cache()
 
             is_best = False
             if args.evaluate and (epoch_log % args.eval_freq == 0):
@@ -294,70 +297,69 @@ def process_batch(batch_data_label, model, args, postprocess=False):
         loss_dict['nnl_loss'] = args.type_weight * type_loss
 
     total_loss = 0
-    for key in loss_dict:
+    for key in loss_dict.keys():
         if 'loss' in key:
             total_loss += loss_dict[key]
 
-    try:
-        if postprocess:
-            
-            affinity_matrix = construction_affinity_matrix_type(inputs_xyz_sub, type_per_point, param_per_point, args.sigma)
-            
-            affinity_matrix_normal = construction_affinity_matrix_normal(inputs_xyz_sub, N_gt, sigma=args.normal_sigma, knn=args.edge_knn) 
+    # try:
+    if postprocess:
+        
+        affinity_matrix = construction_affinity_matrix_type(inputs_xyz_sub, type_per_point, param_per_point, args.sigma)
+        
+        affinity_matrix_normal = construction_affinity_matrix_normal(inputs_xyz_sub, N_gt, sigma=args.normal_sigma, knn=args.edge_knn) 
 
-            obj_idx = batch_data_label['index'][0]
-                
-            spec_embedding_list = []
-            weight_ent = []
+        obj_idx = batch_data_label['index'][0]
+            
+        spec_embedding_list = []
+        weight_ent = []
 
-            # use network feature
-            feat_ent = args.feat_ent_weight - float(npy(compute_entropy(affinity_feat)))
-            weight_ent.append(feat_ent)
-            spec_embedding_list.append(affinity_feat)
-            
-            # use geometry distance feature
-            topk = args.topK            
-            # 求对称正定义广义特征值问题的k个最大或最小特征值以及对应特征向量
-            device = torch.device("cuda:0")
-            affinity_matrix = affinity_matrix.to(device)
-            e, v = torch.lobpcg(affinity_matrix, k=topk, niter=10)
-            v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
+        # use network feature
+        feat_ent = args.feat_ent_weight - float(npy(compute_entropy(affinity_feat)))
+        weight_ent.append(feat_ent)
+        spec_embedding_list.append(affinity_feat)
+        
+        # use geometry distance feature
+        topk = args.topK            
+        # 求对称正定义广义特征值问题的k个最大或最小特征值以及对应特征向量
+        affinity_matrix = affinity_matrix.to(points.device)
+        e, v = torch.lobpcg(affinity_matrix, k=topk, niter=10)
+        v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
 
-            dis_ent = args.dis_ent_weight - float(npy(compute_entropy(v)))
+        dis_ent = args.dis_ent_weight - float(npy(compute_entropy(v)))
+        
+        weight_ent.append(dis_ent)
+        spec_embedding_list.append(v)
             
-            weight_ent.append(dis_ent)
-            spec_embedding_list.append(v)
-                
-            # use edge feature
-            edge_topk = args.edge_topK
-            affinity_matrix_normal = affinity_matrix_normal.to(device)
-            e, v = torch.lobpcg(affinity_matrix_normal, k=edge_topk, niter=10)
-            v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
-            
-            edge_ent = args.edge_ent_weight - float(npy(compute_entropy(v)))
-            
-            weight_ent.append(edge_ent)
-            spec_embedding_list.append(v)
+        # use edge feature
+        edge_topk = args.edge_topK
+        affinity_matrix_normal = affinity_matrix_normal.to(points.device)
+        e, v = torch.lobpcg(affinity_matrix_normal, k=edge_topk, niter=10)
+        v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
+        
+        edge_ent = args.edge_ent_weight - float(npy(compute_entropy(v)))
+        
+        weight_ent.append(edge_ent)
+        spec_embedding_list.append(v)
 
-            
-            
-            # combine features
-            weighted_list = []
-            norm_weight_ent = weight_ent / np.linalg.norm(weight_ent)
-            for i in range(len(spec_embedding_list)):
-                weighted_list.append(spec_embedding_list[i] * weight_ent[i])
+        
+        
+        # combine features
+        weighted_list = []
+        norm_weight_ent = weight_ent / np.linalg.norm(weight_ent)
+        for i in range(len(spec_embedding_list)):
+            weighted_list.append(spec_embedding_list[i] * weight_ent[i])
 
-            spectral_embedding = torch.cat(weighted_list, dim=-1)
-            
-            spec_cluster_pred = mean_shift_gpu(spectral_embedding, bandwidth=args.bandwidth)
-            cluster_pred = spec_cluster_pred
-            miou = compute_miou(spec_cluster_pred, I_gt)
-            loss_dict['miou'] = miou
-            miou = compute_type_miou_abc(type_per_point, T_gt, cluster_pred, I_gt)
-            loss_dict['type_miou'] = miou
-    except:
-        import ipdb
-        ipdb.set_trace()
+        spectral_embedding = torch.cat(weighted_list, dim=-1)
+        
+        spec_cluster_pred = mean_shift_gpu(spectral_embedding, bandwidth=args.bandwidth)
+        cluster_pred = spec_cluster_pred
+        miou = compute_miou(spec_cluster_pred, I_gt)
+        loss_dict['miou'] = miou
+        miou = compute_type_miou_abc(type_per_point, T_gt, cluster_pred, I_gt)
+        loss_dict['type_miou'] = miou
+    # except:
+    #     import ipdb
+    #     ipdb.set_trace()
 
     return total_loss, loss_dict
 

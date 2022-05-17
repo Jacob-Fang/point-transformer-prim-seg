@@ -5,7 +5,7 @@ DATA:
   train_dataset: train_data.txt
   test_dataset: test_data.txt
   train_skip: 1
-  test_skip: 500
+  test_skip: 100
   train_fold: 1
   augment: 0
   if_normal_noise: 0
@@ -34,16 +34,16 @@ TRAIN:
   batch_size: 24  # batch size for training
   batch_size_val: 1  # batch size for validation during training, memory and speed tradeoff
   base_lr: 0.001
-  epochs: 100
+  epochs: 200
   start_epoch: 0
   momentum: 0.9
-  weight_decay: 0.0001
+  weight_decay: 0
   manual_seed: 
   print_freq: 1
   save_freq: 1
   save_path:
   weight:  # path to initial weight (default: none)
-  resume: /home/fz20/Project/point-transformer-prim-seg/exp/ABC/pointtransformer_repro/model/model_last.pth # path to latest checkpoint (default: none)
+  resume:  # path to latest checkpoint (default: none)
   evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
   eval_freq: 1
   is_test: False

@@ -26,7 +26,7 @@ from util import transform as t
 from util.loss_utils import compute_embedding_loss, compute_normal_loss, \
         compute_param_loss, compute_nnl_loss, compute_miou, compute_type_miou_abc, npy
 from util.abc_utils import mean_shift, compute_entropy, construction_affinity_matrix_type, \
-        construction_affinity_matrix_normal
+        construction_affinity_matrix_normal, mean_shift_gpu
 
 
 def get_parser():
@@ -112,7 +112,8 @@ def main_worker(gpu, ngpus_per_node, argss):
     if args.arch == 'pointtransformer_seg_repro':
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
     elif args.arch == 'pointtransformer_primitive_seg_repro':
-        from model.pointtransformer.pointtransformer_primitive_seg import PointTransformerSeg as Model
+        # from model.pointtransformer.pointtransformer_primitive_seg import PointTransformerSeg as Model
+        from model.pointtransformer.dgcnn_transformer import PointTransformer_PrimSeg as Model
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
     # model = Model(c=args.fea_dim, k=args.classes)
@@ -123,7 +124,7 @@ def main_worker(gpu, ngpus_per_node, argss):
 
     # optimizer = torch.optim.SGD(model.parameters(), lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay)
-    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.6), int(args.epochs*0.8)], gamma=0.1) # decay lr by 10% when epoch is 60% and 80% of epochs
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[int(args.epochs*0.2),int(args.epochs*0.4), int(args.epochs*0.6),int(args.epochs*0.8)], gamma=0.1) # decay lr by 10% when epoch is 60% and 80% of epochs
 
     if main_process():
         global logger, writer
@@ -197,47 +198,55 @@ def main_worker(gpu, ngpus_per_node, argss):
             val_sampler = None
         val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val, shuffle=False, num_workers=args.workers, pin_memory=True, sampler=val_sampler)
 
-    for epoch in range(args.start_epoch, args.epochs):
-        if args.distributed:
-            train_sampler.set_epoch(epoch)
-        # loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch)
-        train(train_loader, model, optimizer, epoch)
-        scheduler.step()
-        epoch_log = epoch + 1
-        # if main_process():
-        #     writer.add_scalar('loss_train', loss_train, epoch_log)
-        #     writer.add_scalar('mIoU_train', mIoU_train, epoch_log)
-        #     writer.add_scalar('mAcc_train', mAcc_train, epoch_log)
-        #     writer.add_scalar('allAcc_train', allAcc_train, epoch_log)
+    if args.is_test == True:
+        miou = validate(val_loader, model, 1)
+        if main_process():
+            logger.info('Test IoU: {:.4f}'.format(miou))
+    else:
+        for epoch in range(args.start_epoch, args.epochs):
+            if args.distributed:
+                train_sampler.set_epoch(epoch)
+            # loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, criterion, optimizer, epoch)
+            train(train_loader, model, optimizer, epoch)
+            scheduler.step()
+            epoch_log = epoch + 1
+            # if main_process():
+            #     writer.add_scalar('loss_train', loss_train, epoch_log)
+            #     writer.add_scalar('mIoU_train', mIoU_train, epoch_log)
+            #     writer.add_scalar('mAcc_train', mAcc_train, epoch_log)
+            #     writer.add_scalar('allAcc_train', allAcc_train, epoch_log)
+            torch.cuda.empty_cache()
 
-        is_best = False
-        if args.evaluate and (epoch_log % args.eval_freq == 0):
-            if args.data_name == 'shapenet':
-                raise NotImplementedError()
-            else:
-                # loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion)
-                miou = validate(val_loader, model, epoch_log)
+            is_best = False
+            if args.evaluate and (epoch_log % args.eval_freq == 0):
+                if args.data_name == 'shapenet':
+                    raise NotImplementedError()
+                else:
+                    # loss_val, mIoU_val, mAcc_val, allAcc_val = validate(val_loader, model, criterion)
+                    miou = validate(val_loader, model, epoch_log)
 
-            if main_process():
-                # writer.add_scalar('loss_val', loss_val, epoch_log)
-                # writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
-                # writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
-                # writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
-                is_best = miou > best_iou
-                best_iou = max(best_iou, miou)
+                if main_process():
+                    # writer.add_scalar('loss_val', loss_val, epoch_log)
+                    # writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
+                    # writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
+                    # writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
+                    is_best = miou > best_iou
+                    best_iou = max(best_iou, miou)
 
-        if (epoch_log % args.save_freq == 0) and main_process():
-            filename = args.save_path + '/model/model_last.pth'
-            logger.info('Saving checkpoint to: ' + filename)
-            torch.save({'epoch': epoch_log, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict(),
-                        'scheduler': scheduler.state_dict(), 'best_iou': best_iou, 'is_best': is_best}, filename)
-            if is_best:
-                logger.info('Best validation mIoU updated to: {:.4f}'.format(best_iou))
-                shutil.copyfile(filename, args.save_path + '/model/model_best.pth')
+            if (epoch_log % args.save_freq == 0) and main_process():
+                filename = args.save_path + '/model/model_last.pth'
+                logger.info('Saving checkpoint to: ' + filename)
+                torch.save({'epoch': epoch_log, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                            'scheduler': scheduler.state_dict(), 'best_iou': best_iou, 'is_best': is_best}, filename)
+                if is_best:
+                    logger.info('Best validation mIoU updated to: {:.4f}'.format(best_iou))
+                    shutil.copyfile(filename, args.save_path + '/model/model_best.pth')
+            
+            torch.cuda.empty_cache()
 
-    if main_process():
-        writer.close()
-        logger.info('==>Training done!\nBest Iou: %.3f' % (best_iou))
+        if main_process():
+            writer.close()
+            logger.info('==>Training done!\nBest Iou: %.3f' % (best_iou))
 
 def process_batch(batch_data_label, model, args, postprocess=False):
 
@@ -288,12 +297,13 @@ def process_batch(batch_data_label, model, args, postprocess=False):
         loss_dict['nnl_loss'] = args.type_weight * type_loss
 
     total_loss = 0
-    for key in loss_dict:
+    for key in loss_dict.keys():
         if 'loss' in key:
             total_loss += loss_dict[key]
 
+    # try:
     if postprocess:
-            
+        
         affinity_matrix = construction_affinity_matrix_type(inputs_xyz_sub, type_per_point, param_per_point, args.sigma)
         
         affinity_matrix_normal = construction_affinity_matrix_normal(inputs_xyz_sub, N_gt, sigma=args.normal_sigma, knn=args.edge_knn) 
@@ -311,6 +321,7 @@ def process_batch(batch_data_label, model, args, postprocess=False):
         # use geometry distance feature
         topk = args.topK            
         # 求对称正定义广义特征值问题的k个最大或最小特征值以及对应特征向量
+        affinity_matrix = affinity_matrix.to(points.device)
         e, v = torch.lobpcg(affinity_matrix, k=topk, niter=10)
         v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
 
@@ -321,6 +332,7 @@ def process_batch(batch_data_label, model, args, postprocess=False):
             
         # use edge feature
         edge_topk = args.edge_topK
+        affinity_matrix_normal = affinity_matrix_normal.to(points.device)
         e, v = torch.lobpcg(affinity_matrix_normal, k=edge_topk, niter=10)
         v = v / (torch.norm(v, dim=-1, keepdim=True) + 1e-16)
         
@@ -339,12 +351,15 @@ def process_batch(batch_data_label, model, args, postprocess=False):
 
         spectral_embedding = torch.cat(weighted_list, dim=-1)
         
-        spec_cluster_pred = mean_shift(spectral_embedding, bandwidth=args.bandwidth)
+        spec_cluster_pred = mean_shift_gpu(spectral_embedding, bandwidth=args.bandwidth)
         cluster_pred = spec_cluster_pred
         miou = compute_miou(spec_cluster_pred, I_gt)
         loss_dict['miou'] = miou
         miou = compute_type_miou_abc(type_per_point, T_gt, cluster_pred, I_gt)
         loss_dict['type_miou'] = miou
+    # except:
+    #     import ipdb
+    #     ipdb.set_trace()
 
     return total_loss, loss_dict
 
@@ -512,7 +527,7 @@ def validate(val_loader, model, epoch_log):
             if not isinstance(batch_data_label[key], list):
                 batch_data_label[key] = batch_data_label[key].cuda(non_blocking=True)
         with torch.no_grad():
-            total_loss, loss_dict = process_batch(batch_data_label, postprocess=True)
+            total_loss, loss_dict = process_batch(batch_data_label, model, args, postprocess=True)
         
         if args.multiprocessing_distributed:
             dist.all_reduce(loss_dict['feat_loss'].div_(torch.cuda.device_count()))
@@ -527,18 +542,18 @@ def validate(val_loader, model, epoch_log):
             stat_dict[key] += loss_dict[key].item()
         cnt += len(batch_data_label['index'])
     
-    feat_loss_meter.update(npy(stat_dict['feat_loss_meter']/cnt))
-    param_loss_meter.update(npy(stat_dict['param_loss_meter']/cnt))
-    nnl_loss_meter.update(npy(stat_dict['nnl_loss_meter']/cnt))
-    miou_meter.update(npy(stat_dict['miou']/cnt))
-    type_miou_meter.update(npy(stat_dict['type_miou']/cnt))
+    feat_loss_meter.update(stat_dict['feat_loss']/cnt)
+    param_loss_meter.update(stat_dict['param_loss']/cnt)
+    nnl_loss_meter.update(stat_dict['nnl_loss']/cnt)
+    miou_meter.update(stat_dict['miou']/cnt)
+    type_miou_meter.update(stat_dict['type_miou']/cnt)
     if main_process():
         logger.info('Feat_Loss {feat_loss_meter.val:.4f} '
                     'Param_Loss {param_loss_meter.val:.4f} '
                     'Primitive_Loss {nnl_loss_meter.val:.4f}.'.format(feat_loss_meter=feat_loss_meter,
                                                         param_loss_meter=param_loss_meter,
                                                         nnl_loss_meter=nnl_loss_meter))
-        logger.info('Val result: mIoU/Type mIou {:.4f}/{:.4f}.'.format(miou_meter, type_miou_meter))
+        logger.info('Val result: mIoU/Type mIou {miou_meter.val:.4f}/{type_miou_meter.val:.4f}.'.format(miou_meter=miou_meter, type_miou_meter=type_miou_meter))
 
         writer.add_scalar('feat_loss_val', feat_loss_meter.val, epoch_log)
         writer.add_scalar('param_loss_val', param_loss_meter.val, epoch_log)

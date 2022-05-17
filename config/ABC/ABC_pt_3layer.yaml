@@ -1,0 +1,56 @@
+# data parameters
+DATA:
+  data_name: ABC
+  data_root: /file/fz20/ABC_final/
+  train_dataset: train_data.txt
+  test_dataset: test_data.txt
+  train_skip: 1
+  test_skip: 100
+  train_fold: 1
+  augment: 0
+  if_normal_noise: 0
+  fea_dim: 6  # point feature dimension
+
+PARAMETERS:
+  loss_class: frp # loss functions; f:embedding loss; r:primitive loss; p:parameter loss, n:normal loss
+  param_weight: 0.1
+  type_weight: 1.0
+  normal_weight: 1.0
+  sigma: 0.8  # affinity matrix hyper paramter
+  normal_sigma: 0.1 # normal difference affinity matrix hyper paramter
+  edge_knn: 50  # k nearest neighbor of normal
+  feat_ent_weight: 1.70 # network feature entropy weight
+  dis_ent_weight: 1.10  # primitive distance entropy weight
+  edge_ent_weight: 1.23 # edge boundary entropy weight
+  topK: 10  # the number of eigenvectors used
+  edge_topK: 12 # the number of eigenvectors edge feature used
+  bandwidth: 2.41 # kernl bandwidth
+
+TRAIN:
+  arch: pointtransformer_primitive_seg_repro
+  train_gpu: [0,1]
+  sync_bn: False
+  workers: 4  # data loader workers
+  batch_size: 32  # batch size for training
+  batch_size_val: 2  # batch size for validation during training, memory and speed tradeoff
+  base_lr: 0.001
+  epochs: 200
+  start_epoch: 0
+  momentum: 0.9
+  weight_decay: 0
+  manual_seed: 
+  print_freq: 1
+  save_freq: 1
+  save_path:
+  weight:  # path to initial weight (default: none)
+  resume:  # path to latest checkpoint (default: none)
+  evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
+  eval_freq: 1
+  is_test: False
+
+Distributed:
+  dist_url: tcp://localhost:8888
+  dist_backend: 'nccl'
+  multiprocessing_distributed: True
+  world_size: 1 #分布式主机数量
+  rank: 0

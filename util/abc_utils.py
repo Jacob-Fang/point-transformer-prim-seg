@@ -127,7 +127,7 @@ def mean_shift_gpu(x, bandwidth):
     # x: [N, f]
     b, N, c = x.shape
     IDX = torch.zeros(b, N).to(x.device).long()
-    ms = MeanShift_GPU(bandwidth=bandwidth, batch_size=1000)
+    ms = MeanShift_GPU(bandwidth=bandwidth, batch_size=1750)
     for i in range(b):
         # print ('Mean shift clustering, might take some time ...')
         tic = time.time()

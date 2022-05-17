@@ -84,10 +84,10 @@ class PointTransformerBlock(nn.Module):
     def forward(self, px):
         p, x = px
     
-        y = self.relu(self.bn1(self.linear1(x)))
-        y = self.relu(self.bn(self.transformer([p, y])[1]))
+        y1 = self.relu(self.bn1(self.linear1(x)))
+        y = self.relu(self.bn(self.transformer([p, y1])[1]))
         y = self.bn2(self.linear2(y))
-        y += x
+        y += y1
         y = self.relu(y)
         return [p, y]
 
