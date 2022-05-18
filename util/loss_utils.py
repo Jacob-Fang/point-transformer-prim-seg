@@ -9,6 +9,8 @@ from functools import wraps
 import time
 from lapsolver import solve_dense
 from torch.autograd import Variable
+
+from lib.pointops.functions import pointops
 DIVISION_EPS = 1e-10
 
 def npy(var):
@@ -392,6 +394,70 @@ def compute_param_loss(pred, T_gt, T_param_gt):
             return torch.Tensor([0.0]).to(T_gt.device)
         return l2_loss(tmp_pred, tmp_gt.float())
 
+    total_loss = total_loss / cnt
+
+    return total_loss
+
+def comput_boundary_loss(p, features, target):
+    
+    total_loss = 0
+    cnt = 0
+    batch_size, _, _ = features.shape
+    nsample = 24
+    neighbor_idx = pointops.knnquery(nsample, p, p)
+    nsample -= 1
+    for i in range(batch_size):
+        # labels = F.one_hot(target, target.max()+1).float()
+        labels = get_one_hot(target[i] + 1,
+                                    target[i].max() + 2)
+
+        neighbor_idx_i = neighbor_idx[i][..., 1:].contiguous()
+        m = neighbor_idx_i.shape[0]
+
+        neighbor_label = labels[neighbor_idx_i.view(-1).long(), :].view(m, nsample, labels.shape[1]) # (m, nsample, ncls)
+        neighbor_feature = features[i][neighbor_idx_i.view(-1).long(), :].view(m, nsample, features.shape[2])
+
+        labels = torch.argmax(torch.unsqueeze(labels, -2), -1)  # [m, 1]
+        neighbor_label = torch.argmax(neighbor_label, -1)  # [m, nsample]
+        posmask = labels == neighbor_label  # [m, nsample]
+
+        point_mask = torch.sum(posmask.int(), -1)  # (m)
+        point_mask = torch.logical_and(0 < point_mask, point_mask < nsample)
+
+        if not torch.any(point_mask):
+            loss = .0
+            total_loss += loss
+            cnt += 1
+            continue
+
+        posmask = posmask[point_mask]
+        features_i = features[i][point_mask]
+        neighbor_feature = neighbor_feature[point_mask]
+
+        # dist_l2
+        dist = torch.unsqueeze(features_i, -2) - neighbor_feature
+        dist = torch.sqrt(torch.sum(dist ** 2, axis=-1) + 1e-12) # [m, nsample]
+
+        # compute loss
+        dist = -dist
+        dist = dist - torch.max(dist, -1, keepdim=True)[0]  # NOTE: max return both (max value, index)
+
+        dist = dist / 1
+        exp = torch.exp(dist)
+
+        # if invalid_mask is not None:
+        #     valid_mask = 1 - invalid_mask
+        #     exp = exp * valid_mask
+
+        pos = torch.sum(exp * posmask, axis=-1)  # (m)
+        neg = torch.sum(exp, axis=-1)  # (m)
+        loss = -torch.log(pos / neg + 1e-12)
+
+        loss = torch.mean(loss)
+
+        total_loss += loss
+        cnt += 1
+    
     total_loss = total_loss / cnt
 
     return total_loss

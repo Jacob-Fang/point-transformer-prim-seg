@@ -23,7 +23,7 @@ from util.s3dis import S3DIS
 from util.common_util import AverageMeter, intersectionAndUnionGPU, find_free_port
 from util.data_util import collate_fn
 from util import transform as t
-from util.loss_utils import compute_embedding_loss, compute_normal_loss, \
+from util.loss_utils import comput_boundary_loss, compute_embedding_loss, compute_normal_loss, \
         compute_param_loss, compute_nnl_loss, compute_miou, compute_type_miou_abc, npy
 from util.abc_utils import mean_shift, compute_entropy, construction_affinity_matrix_type, \
         construction_affinity_matrix_normal, mean_shift_gpu
@@ -271,6 +271,7 @@ def process_batch(batch_data_label, model, args, postprocess=False):
 
     sub_idx = subidx.squeeze(1)
     inputs_xyz_sub = torch.gather(inputs_xyz_th, -1, sub_idx.unsqueeze(1).repeat(1,3,1))
+    p = inputs_xyz_sub.permute(0,2,1).contiguous()
     N_gt = (batch_data_label['gt_normal']).float().cuda(non_blocking=True)
     N_gt = torch.gather(N_gt, 1, sub_idx.unsqueeze(-1).repeat(1,1,3))
     I_gt = torch.gather(batch_data_label['I_gt'], -1, sub_idx)
@@ -281,7 +282,9 @@ def process_batch(batch_data_label, model, args, postprocess=False):
     if 'f' in args.loss_class:
         # network feature loss
         feat_loss, pull_loss, push_loss = compute_embedding_loss(affinity_feat, I_gt)
+        boundary_loss = comput_boundary_loss(p, affinity_feat, I_gt)
         loss_dict['feat_loss'] = feat_loss
+        loss_dict['boundary_loss'] = boundary_loss
     # if 'n' in args.loss_class:
     #     # normal angle loss
     #     normal_loss = compute_normal_loss(normal_per_point, N_gt)
