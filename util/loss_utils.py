@@ -400,7 +400,7 @@ def compute_param_loss(pred, T_gt, T_param_gt):
 
 def comput_boundary_loss(p, features, target):
     
-    total_loss = 0
+    total_loss = torch.Tensor([0.0]).to(features.device)
     cnt = 0
     batch_size, _, _ = features.shape
     nsample = 24
@@ -408,10 +408,13 @@ def comput_boundary_loss(p, features, target):
     nsample -= 1
     for i in range(batch_size):
         # labels = F.one_hot(target, target.max()+1).float()
-        labels = get_one_hot(target[i] + 1,
-                                    target[i].max() + 2)
+        if target[i].min() == -1:
+            labels = get_one_hot(target[i] + 1,
+                                        target[i].max() + 2)
+        else:
+            labels = get_one_hot(target[i], target[i].max() + 1)
 
-        neighbor_idx_i = neighbor_idx[i][..., 1:].contiguous()
+        neighbor_idx_i = neighbor_idx[i][..., 1:].contiguous()  # [m, nsample-1]
         m = neighbor_idx_i.shape[0]
 
         neighbor_label = labels[neighbor_idx_i.view(-1).long(), :].view(m, nsample, labels.shape[1]) # (m, nsample, ncls)

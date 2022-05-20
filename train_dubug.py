@@ -376,6 +376,7 @@ def train(train_loader, model, optimizer, epoch):
     feat_loss_meter = AverageMeter()
     param_loss_meter = AverageMeter()
     nnl_loss_meter = AverageMeter()
+    boundary_loss_meter = AverageMeter()
 
     model.train()
     end = time.time()
@@ -398,14 +399,17 @@ def train(train_loader, model, optimizer, epoch):
         feat_loss = loss_dict['feat_loss']
         param_loss = loss_dict['param_loss']
         nnl_loss = loss_dict['nnl_loss']
+        boundary_loss = loss_dict['boundary_loss']
         if args.multiprocessing_distributed:
             dist.all_reduce(feat_loss.div_(torch.cuda.device_count()))
             dist.all_reduce(param_loss.div_(torch.cuda.device_count()))
             dist.all_reduce(nnl_loss.div_(torch.cuda.device_count()))
+            dist.all_reduce(boundary_loss.div_(torch.cuda.device_count()))
 
         feat_loss_meter.update(npy(feat_loss).item())
         param_loss_meter.update(npy(param_loss).item())
         nnl_loss_meter.update(npy(nnl_loss).item())
+        boundary_loss_meter.update(npy(boundary_loss).item())
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -423,17 +427,20 @@ def train(train_loader, model, optimizer, epoch):
                         'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
                         'Remain {remain_time} '
                         'Feat_Loss {feat_loss_meter.val:.4f} '
+                        'Boundary_Loss {boundary_loss_meter.val:.4f} '
                         'Param_Loss {param_loss_meter.val:.4f} '
                         'Primitive_Loss {nnl_loss_meter.val:.4f}.'.format(epoch+1, args.epochs, batch_idx + 1, len(train_loader),
                                                           batch_time=batch_time, data_time=data_time,
                                                           remain_time=remain_time,
                                                           feat_loss_meter=feat_loss_meter,
+                                                          boundary_loss_meter=boundary_loss_meter,
                                                           param_loss_meter=param_loss_meter,
                                                           nnl_loss_meter=nnl_loss_meter))
         if main_process():
             writer.add_scalar('feat_loss_train_batch', feat_loss_meter.val, current_iter)
             writer.add_scalar('param_loss_train_batch', param_loss_meter.val, current_iter)
             writer.add_scalar('nnl_loss_train_batch', nnl_loss_meter.val, current_iter)
+            writer.add_scalar('boundary_loss_train_batch', boundary_loss_meter.val, current_iter)
             writer.add_scalar('data_time', data_time.val, current_iter)
             writer.add_scalar('batch_time', batch_time.val, current_iter)
         
@@ -516,6 +523,7 @@ def validate(val_loader, model, epoch_log):
     feat_loss_meter = AverageMeter()
     param_loss_meter = AverageMeter()
     nnl_loss_meter = AverageMeter()
+    boundary_loss_meter = AverageMeter()
     miou_meter = AverageMeter()
     type_miou_meter = AverageMeter()
 
@@ -536,6 +544,7 @@ def validate(val_loader, model, epoch_log):
             dist.all_reduce(loss_dict['feat_loss'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['param_loss'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['nnl_loss'].div_(torch.cuda.device_count()))
+            dist.all_reduce(loss_dict['boundary_loss'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['miou'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['type_miou'].div_(torch.cuda.device_count()))
         
@@ -548,19 +557,23 @@ def validate(val_loader, model, epoch_log):
     feat_loss_meter.update(stat_dict['feat_loss']/cnt)
     param_loss_meter.update(stat_dict['param_loss']/cnt)
     nnl_loss_meter.update(stat_dict['nnl_loss']/cnt)
+    boundary_loss_meter.update(stat_dict['boundary_loss']/cnt)
     miou_meter.update(stat_dict['miou']/cnt)
     type_miou_meter.update(stat_dict['type_miou']/cnt)
     if main_process():
         logger.info('Feat_Loss {feat_loss_meter.val:.4f} '
+                    'Boundary_Loss {boundary_loss_meter.val:.4f} '
                     'Param_Loss {param_loss_meter.val:.4f} '
                     'Primitive_Loss {nnl_loss_meter.val:.4f}.'.format(feat_loss_meter=feat_loss_meter,
                                                         param_loss_meter=param_loss_meter,
+                                                        boundary_loss_meter=boundary_loss_meter,
                                                         nnl_loss_meter=nnl_loss_meter))
         logger.info('Val result: mIoU/Type mIou {miou_meter.val:.4f}/{type_miou_meter.val:.4f}.'.format(miou_meter=miou_meter, type_miou_meter=type_miou_meter))
 
         writer.add_scalar('feat_loss_val', feat_loss_meter.val, epoch_log)
         writer.add_scalar('param_loss_val', param_loss_meter.val, epoch_log)
         writer.add_scalar('nnl_loss_val', nnl_loss_meter.val, epoch_log)
+        writer.add_scalar('boundary_loss_val', boundary_loss_meter.val, epoch_log)
         writer.add_scalar('miou', miou_meter.val, epoch_log)
         writer.add_scalar('type_miou', type_miou_meter.val, epoch_log)
 
