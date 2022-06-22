@@ -1,7 +1,7 @@
 # data parameters
 DATA:
   data_name: ABC
-  data_root: /file/fz20/ABC_final/
+  data_root: /file/fz20/ABC_final
   train_dataset: train_data.txt
   test_dataset: test_data.txt
   train_skip: 1
@@ -28,11 +28,11 @@ PARAMETERS:
 
 TRAIN:
   arch: pointtransformer_primitive_seg_repro
-  train_gpu: [0,1,3,4]
+  train_gpu: [3,4]
   sync_bn: False
   workers: 4  # data loader workers
-  batch_size: 64  # batch size for training
-  batch_size_val: 4  # batch size for validation during training, memory and speed tradeoff
+  batch_size: 16  # batch size for training
+  batch_size_val: 2  # batch size for validation during training, memory and speed tradeoff
   base_lr: 0.001
   epochs: 200
   start_epoch: 0

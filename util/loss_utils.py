@@ -1,3 +1,4 @@
+from collections import Counter
 import numpy as np
 import torch
 from torch import nn
@@ -398,12 +399,99 @@ def compute_param_loss(pred, T_gt, T_param_gt):
 
     return total_loss
 
-def comput_boundary_loss(p, features, target):
+def compute_boundary_loss_v2(p, features, target):
+    total_loss = torch.Tensor([0.0]).to(features.device)
+    cnt = 0
+    batch_size, _, _ = features.shape
+    # nsample = 8
+    # neighbor_idx = pointops.knnquery(nsample, p, p)
+    # nsample -= 1
+    for i in range(batch_size):
+    #     if target[i].min() == -1:
+    #         labels = get_one_hot(target[i] + 1,
+    #                                     target[i].max() + 2)
+    #     else:
+    #         labels = get_one_hot(target[i], target[i].max() + 1)
+
+    #     neighbor_idx_i = neighbor_idx[i][..., 1:].contiguous()  # [m, nsample-1]
+    #     m = neighbor_idx_i.shape[0]
+
+    #     neighbor_label = labels[neighbor_idx_i.view(-1).long(), :].view(m, nsample, labels.shape[1]) # (m, nsample, ncls)
+    #     neighbor_feature = features[i][neighbor_idx_i.view(-1).long(), :].view(m, nsample, features.shape[2])
+
+    #     labels = torch.argmax(torch.unsqueeze(labels, -2), -1)  # [m, 1]
+    #     neighbor_label = torch.argmax(neighbor_label, -1)  # [m, nsample]
+    #     posmask = labels == neighbor_label  # [m, nsample]
+
+    #     point_mask = torch.sum(posmask.int(), -1)  # (m)
+    #     point_mask = torch.logical_and(0 < point_mask, point_mask < nsample)    # 边界点mask
+
+    #     if not torch.any(point_mask):
+    #         loss = .0
+    #         total_loss += loss
+    #         cnt += 1
+    #         continue
+
+
+        num_class = target[i].max() + 2
+
+        boundary_embeddings = []
+        embeddings = []
+
+        for j in range(num_class):
+            mask = (target[i] == (j - 1))
+            feature = features[i][mask]
+            if len(feature) == 0:
+                continue
+            search_p = p[i][mask] #搜索当前patch的边界点
+            search_p = torch.unsqueeze(search_p, dim=0)
+            p_i = torch.unsqueeze(p[i], dim=0)
+            nsample = 4
+            neighbor_idx = pointops.knnquery(nsample, p_i, search_p)
+            # neighbor_idx_i = neighbor_idx[..., 1:].contiguous()
+            neighbor_label = target[i][neighbor_idx.view(-1).long()].view(-1, nsample)
+            posmask = neighbor_label == j-1
+            point_mask = torch.sum(posmask.int(), -1)
+            point_mask = point_mask < nsample
+
+            # if not torch.any(point_mask):
+            #     loss = .0
+            #     total_loss += loss
+            #     cnt += 1
+            #     continue
+
+            boundary_feature = feature[point_mask]
+
+            boundary_embeddings.append(boundary_feature)  # (M, K)
+            embeddings.append(feature)  # (M, K)
+
+        centers = []
+
+        for feature in embeddings:
+            center = torch.mean(feature, dim=0).view(1, -1)
+            centers.append(center)
+        
+        pull_loss_tp = torch.Tensor([0.0]).to(features.device)
+        for feature, center in zip(boundary_embeddings, centers):
+            if len(feature) == 0:
+                pull_loss_tp += .0
+                continue
+            dis = torch.norm(feature - center, 2, dim=1) - 0.5
+            dis = F.relu(dis)
+            pull_loss_tp += torch.mean(dis)
+
+        total_loss = total_loss + pull_loss_tp / len(boundary_embeddings)
+
+    total_loss = total_loss / batch_size
+    return total_loss
+
+
+def compute_boundary_loss(p, features, target):
     
     total_loss = torch.Tensor([0.0]).to(features.device)
     cnt = 0
     batch_size, _, _ = features.shape
-    nsample = 24
+    nsample = 8
     neighbor_idx = pointops.knnquery(nsample, p, p)
     nsample -= 1
     for i in range(batch_size):
@@ -425,7 +513,7 @@ def comput_boundary_loss(p, features, target):
         posmask = labels == neighbor_label  # [m, nsample]
 
         point_mask = torch.sum(posmask.int(), -1)  # (m)
-        point_mask = torch.logical_and(0 < point_mask, point_mask < nsample)
+        point_mask = torch.logical_and(0 < point_mask, point_mask < nsample)    # 边界点mask
 
         if not torch.any(point_mask):
             loss = .0
@@ -434,12 +522,21 @@ def comput_boundary_loss(p, features, target):
             continue
 
         posmask = posmask[point_mask]
-        features_i = features[i][point_mask]
-        neighbor_feature = neighbor_feature[point_mask]
+        features_i = features[i][point_mask]    # 边界点的特征
+        neighbor_feature = neighbor_feature[point_mask] # 边界点的邻域点的特征
 
         # dist_l2
         dist = torch.unsqueeze(features_i, -2) - neighbor_feature
         dist = torch.sqrt(torch.sum(dist ** 2, axis=-1) + 1e-12) # [m, nsample]
+
+        # # dist_kl
+        # features_i = F.log_softmax(features_i, dim=-1)
+        # features_i = features_i.unsqueeze(-2)
+        # features_i = features_i.expand([neighbor_feature.shape[0], nsample, 128])
+        # neighbor_feature = F.log_softmax(neighbor_feature, dim=-1)
+        # dist = F.kl_div(neighbor_feature, features_i, reduction='none', log_target=True)
+        # dist = F.softmax(neighbor_feature, dim=-1) * (F.log_softmax(neighbor_feature, dim=-1) - F.log_softmax(features_i, dim=-1))  
+        # dist = dist.sum(-1) # 边界点与邻域点的kl散度度量
 
         # compute loss
         dist = -dist
@@ -452,9 +549,17 @@ def comput_boundary_loss(p, features, target):
         #     valid_mask = 1 - invalid_mask
         #     exp = exp * valid_mask
 
+        # softnn
         pos = torch.sum(exp * posmask, axis=-1)  # (m)
         neg = torch.sum(exp, axis=-1)  # (m)
         loss = -torch.log(pos / neg + 1e-12)
+
+        # # nce
+        # neg = torch.sum(exp * (~posmask), axis=-1)  # (m)
+        # pos = torch.sum(exp * posmask, axis=-1)  # (m)
+        # exp = torch.sum(exp, axis=-1)  # (m)
+        # loss = (pos / (exp + neg) + 1e-12)
+        # loss = -torch.log(loss)
 
         loss = torch.mean(loss)
 
@@ -464,3 +569,29 @@ def comput_boundary_loss(p, features, target):
     total_loss = total_loss / cnt
 
     return total_loss
+
+def compute_boundary_detect_loss(pred, gt):
+    '''
+    pred: (B, N, K)
+    gt: (B, N)
+    '''
+
+    gt_np = gt.cpu().numpy()
+    N_sum = 0
+    P_sum = 0
+    for i in range(gt_np.shape[0]):
+        count = Counter(gt_np[i])
+        for k, v in count.items():
+            if k == 0:
+                N_sum += v
+            if k == 1:
+                P_sum += v
+    
+    gt = gt.to(torch.int64)
+    gt = F.one_hot(gt).float()
+    pos_weight = torch.full_like(gt[0], N_sum/P_sum)
+
+    bound_loss = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    loss = bound_loss(pred, gt)
+
+    return loss

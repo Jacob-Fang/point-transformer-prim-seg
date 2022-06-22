@@ -5,6 +5,7 @@ import numpy as np
 import logging
 import argparse
 import shutil
+import h5py
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -23,8 +24,8 @@ from util.s3dis import S3DIS
 from util.common_util import AverageMeter, intersectionAndUnionGPU, find_free_port
 from util.data_util import collate_fn
 from util import transform as t
-from util.loss_utils import compute_embedding_loss, compute_normal_loss, \
-        compute_param_loss, compute_nnl_loss, compute_miou, compute_type_miou_abc, npy, comput_boundary_loss
+from util.loss_utils import compute_boundary_detect_loss, compute_boundary_loss_v2, compute_embedding_loss, compute_normal_loss, \
+        compute_param_loss, compute_nnl_loss, compute_miou, compute_type_miou_abc, npy, compute_boundary_loss
 from util.abc_utils import mean_shift, compute_entropy, construction_affinity_matrix_type, \
         construction_affinity_matrix_normal, mean_shift_gpu
 
@@ -112,12 +113,14 @@ def main_worker(gpu, ngpus_per_node, argss):
     if args.arch == 'pointtransformer_seg_repro':
         from model.pointtransformer.pointtransformer_seg import pointtransformer_seg_repro as Model
     elif args.arch == 'pointtransformer_primitive_seg_repro':
-        from model.pointtransformer.pointtransformer_primitive_seg import PointTransformerSeg as Model
-        # from model.pointtransformer.dgcnn_transformer import PointTransformer_PrimSeg as Model
+        # from model.pointtransformer.pointtransformer_primitive_seg import PointTransformerSeg as Model
+        from model.pointtransformer.dgcnn_transformer import PointTransformer_PrimSeg as Model
+        # from model.pointtransformer.dgcnn_transformer import PrimitiveNet as Model  # DGCNN
     else:
         raise Exception('architecture not supported yet'.format(args.arch))
     # model = Model(c=args.fea_dim, k=args.classes)
     model = Model(c=args.fea_dim, args=args)
+    # model = Model() #DGCNN
     if args.sync_bn:
        model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
     # criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label).cuda()
@@ -268,6 +271,7 @@ def process_batch(batch_data_label, model, args, postprocess=False):
     inputs_xyz = torch.gather(inputs_xyz.permute(0, 2, 1), -1, subidx.repeat(1,3,1)) # [b, 6, n_sub]
     
     affinity_feat, type_per_point, param_per_point = model(points.transpose(1, 2).contiguous())
+    # affinity_feat, type_per_point, param_per_point, sub_idx = model(inputs_xyz_th, inputs_n_th, postprocess=postprocess)    #DGCNN
 
     sub_idx = subidx.squeeze(1)
     inputs_xyz_sub = torch.gather(inputs_xyz_th, -1, sub_idx.unsqueeze(1).repeat(1,3,1))
@@ -276,15 +280,20 @@ def process_batch(batch_data_label, model, args, postprocess=False):
     N_gt = torch.gather(N_gt, 1, sub_idx.unsqueeze(-1).repeat(1,1,3))
     I_gt = torch.gather(batch_data_label['I_gt'], -1, sub_idx)
     T_gt = torch.gather(batch_data_label['T_gt'], -1, sub_idx)
+    # B_gt = torch.gather(batch_data_label['boundary'], -1, sub_idx) # 边界点gt
 
     loss_dict = {}
         
     if 'f' in args.loss_class:
         # network feature loss
         feat_loss, pull_loss, push_loss = compute_embedding_loss(affinity_feat, I_gt)
-        boundary_loss = comput_boundary_loss(p, affinity_feat, I_gt)
+        boundary_loss = compute_boundary_loss_v2(p, affinity_feat, I_gt)
         loss_dict['feat_loss'] = feat_loss
-        loss_dict['boundary_loss'] = boundary_loss
+        loss_dict['boundary_loss'] = boundary_loss * 0.1
+
+        # # boundary_detect BCE loss
+        # bound_loss = compute_boundary_detect_loss(boundary_per_point, B_gt)
+        # loss_dict['boundary_detect_loss'] = 1 * bound_loss
     # if 'n' in args.loss_class:
     #     # normal angle loss
     #     normal_loss = compute_normal_loss(normal_per_point, N_gt)
@@ -363,6 +372,8 @@ def process_batch(batch_data_label, model, args, postprocess=False):
     # except:
     #     import ipdb
     #     ipdb.set_trace()
+    if args.is_vis:
+        return total_loss, loss_dict, inputs_xyz_sub, I_gt, spec_cluster_pred
 
     return total_loss, loss_dict
 
@@ -377,6 +388,7 @@ def train(train_loader, model, optimizer, epoch):
     param_loss_meter = AverageMeter()
     nnl_loss_meter = AverageMeter()
     boundary_loss_meter = AverageMeter()
+    boundary_detect_loss_meter = AverageMeter()
 
     model.train()
     end = time.time()
@@ -400,16 +412,19 @@ def train(train_loader, model, optimizer, epoch):
         param_loss = loss_dict['param_loss']
         nnl_loss = loss_dict['nnl_loss']
         boundary_loss = loss_dict['boundary_loss']
+        # boundary_detect_loss = loss_dict['boundary_detect_loss']
         if args.multiprocessing_distributed:
             dist.all_reduce(feat_loss.div_(torch.cuda.device_count()))
             dist.all_reduce(param_loss.div_(torch.cuda.device_count()))
             dist.all_reduce(nnl_loss.div_(torch.cuda.device_count()))
             dist.all_reduce(boundary_loss.div_(torch.cuda.device_count()))
+            # dist.all_reduce(boundary_detect_loss.div_(torch.cuda.device_count()))
 
         feat_loss_meter.update(npy(feat_loss).item())
         param_loss_meter.update(npy(param_loss).item())
         nnl_loss_meter.update(npy(nnl_loss).item())
         boundary_loss_meter.update(npy(boundary_loss).item())
+        # boundary_detect_loss_meter.update(npy(boundary_detect_loss).item())
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -428,12 +443,14 @@ def train(train_loader, model, optimizer, epoch):
                         'Remain {remain_time} '
                         'Feat_Loss {feat_loss_meter.val:.4f} '
                         'Boundary_Loss {boundary_loss_meter.val:.4f} '
+                        # 'Boundary_Detect_Loss {boundary_detect_loss_meter.val:.4f} '
                         'Param_Loss {param_loss_meter.val:.4f} '
                         'Primitive_Loss {nnl_loss_meter.val:.4f}.'.format(epoch+1, args.epochs, batch_idx + 1, len(train_loader),
                                                           batch_time=batch_time, data_time=data_time,
                                                           remain_time=remain_time,
                                                           feat_loss_meter=feat_loss_meter,
                                                           boundary_loss_meter=boundary_loss_meter,
+                                                        #   boundary_detect_loss_meter=boundary_detect_loss_meter,
                                                           param_loss_meter=param_loss_meter,
                                                           nnl_loss_meter=nnl_loss_meter))
         if main_process():
@@ -441,6 +458,7 @@ def train(train_loader, model, optimizer, epoch):
             writer.add_scalar('param_loss_train_batch', param_loss_meter.val, current_iter)
             writer.add_scalar('nnl_loss_train_batch', nnl_loss_meter.val, current_iter)
             writer.add_scalar('boundary_loss_train_batch', boundary_loss_meter.val, current_iter)
+            # writer.add_scalar('boundary_detect_loss_train_batch', boundary_detect_loss_meter.val, current_iter)
             writer.add_scalar('data_time', data_time.val, current_iter)
             writer.add_scalar('batch_time', batch_time.val, current_iter)
         
@@ -526,11 +544,15 @@ def validate(val_loader, model, epoch_log):
     boundary_loss_meter = AverageMeter()
     miou_meter = AverageMeter()
     type_miou_meter = AverageMeter()
+    boundary_detect_loss_meter = AverageMeter()
 
     model.eval()
     end = time.time()
     stat_dict = {}
     cnt = 0
+    test_points = []
+    test_seg_gt = []
+    test_seg_pre = []
 
     for batch_idx, batch_data_label in enumerate(val_loader):
         data_time.update(time.time() - end)
@@ -538,13 +560,37 @@ def validate(val_loader, model, epoch_log):
             if not isinstance(batch_data_label[key], list):
                 batch_data_label[key] = batch_data_label[key].cuda(non_blocking=True)
         with torch.no_grad():
-            total_loss, loss_dict = process_batch(batch_data_label, model, args, postprocess=True)
+            if args.is_vis:
+                total_loss, loss_dict, inputs_xyz_sub, I_gt, spec_cluster_pred = process_batch(batch_data_label, model, args, postprocess=True)
+            else:
+                total_loss, loss_dict = process_batch(batch_data_label, model, args, postprocess=True)
         
+        if args.is_vis:
+            points_list = [torch.zeros([1,3,7000], dtype=torch.float32, device=inputs_xyz_sub.device) for _ in range(2)]
+            seg_gt_list = [torch.zeros([1,7000], dtype=torch.int64, device=I_gt.device) for _ in range(2)]
+            seg_pre_list = [torch.zeros([1,7000], dtype=torch.int64, device=spec_cluster_pred.device) for _ in range(2)]
+            if args.multiprocessing_distributed:
+                dist.all_gather(points_list, inputs_xyz_sub)
+                dist.all_gather(seg_gt_list, I_gt)
+                dist.all_gather(seg_pre_list, spec_cluster_pred)
+                for i in range(len(points_list)):
+                    test_points.append(points_list[i].cpu().numpy())
+                    test_seg_gt.append(seg_gt_list[i].cpu().numpy())
+                    test_seg_pre.append(seg_pre_list[i].cpu().numpy())
+            # inputs_xyz_sub = inputs_xyz_sub.cpu().numpy()
+            # I_gt = I_gt.cpu().numpy()
+            # spec_cluster_pred = spec_cluster_pred.cpu().numpy()
+            # test_points.append(inputs_xyz_sub)
+            # test_seg_gt.append(I_gt)
+            # test_seg_pre.append(spec_cluster_pred)
+            
+
         if args.multiprocessing_distributed:
             dist.all_reduce(loss_dict['feat_loss'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['param_loss'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['nnl_loss'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['boundary_loss'].div_(torch.cuda.device_count()))
+            # dist.all_reduce(loss_dict['boundary_detect_loss'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['miou'].div_(torch.cuda.device_count()))
             dist.all_reduce(loss_dict['type_miou'].div_(torch.cuda.device_count()))
         
@@ -558,15 +604,26 @@ def validate(val_loader, model, epoch_log):
     param_loss_meter.update(stat_dict['param_loss']/cnt)
     nnl_loss_meter.update(stat_dict['nnl_loss']/cnt)
     boundary_loss_meter.update(stat_dict['boundary_loss']/cnt)
+    # boundary_detect_loss_meter.update(stat_dict['boundary_detect_loss']/cnt)
     miou_meter.update(stat_dict['miou']/cnt)
     type_miou_meter.update(stat_dict['type_miou']/cnt)
     if main_process():
+        if args.is_vis:
+            test_points = np.array(test_points)
+            test_seg_gt = np.array(test_seg_gt)
+            test_seg_pre = np.array(test_seg_pre)
+            with h5py.File(args.save_path + "/visualization/test_skip100.h5", "a") as fp:
+                    fp.create_dataset("points", data=test_points)
+                    fp.create_dataset("seg_gt", data=test_seg_gt)
+                    fp.create_dataset("seg_pre", data=test_seg_pre)
         logger.info('Feat_Loss {feat_loss_meter.val:.4f} '
                     'Boundary_Loss {boundary_loss_meter.val:.4f} '
+                    # 'Boundary_Detect_Loss {boundary_detect_loss_meter.val:.4f} '
                     'Param_Loss {param_loss_meter.val:.4f} '
                     'Primitive_Loss {nnl_loss_meter.val:.4f}.'.format(feat_loss_meter=feat_loss_meter,
                                                         param_loss_meter=param_loss_meter,
                                                         boundary_loss_meter=boundary_loss_meter,
+                                                        # boundary_detect_loss_meter=boundary_detect_loss_meter,
                                                         nnl_loss_meter=nnl_loss_meter))
         logger.info('Val result: mIoU/Type mIou {miou_meter.val:.4f}/{type_miou_meter.val:.4f}.'.format(miou_meter=miou_meter, type_miou_meter=type_miou_meter))
 
@@ -574,6 +631,7 @@ def validate(val_loader, model, epoch_log):
         writer.add_scalar('param_loss_val', param_loss_meter.val, epoch_log)
         writer.add_scalar('nnl_loss_val', nnl_loss_meter.val, epoch_log)
         writer.add_scalar('boundary_loss_val', boundary_loss_meter.val, epoch_log)
+        # writer.add_scalar('boundary_detect_loss_val', boundary_detect_loss_meter.val, epoch_log)
         writer.add_scalar('miou', miou_meter.val, epoch_log)
         writer.add_scalar('type_miou', type_miou_meter.val, epoch_log)
 

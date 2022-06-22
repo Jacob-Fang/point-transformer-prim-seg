@@ -23,7 +23,7 @@ from util.s3dis import S3DIS
 from util.common_util import AverageMeter, intersectionAndUnionGPU, find_free_port
 from util.data_util import collate_fn
 from util import transform as t
-from util.loss_utils import comput_boundary_loss, compute_embedding_loss, compute_normal_loss, \
+from util.loss_utils import compute_boundary_loss, compute_boundary_loss_v2, compute_embedding_loss, compute_normal_loss, \
         compute_param_loss, compute_nnl_loss, compute_miou, compute_type_miou_abc, npy
 from util.abc_utils import mean_shift, compute_entropy, construction_affinity_matrix_type, \
         construction_affinity_matrix_normal, mean_shift_gpu
@@ -282,7 +282,7 @@ def process_batch(batch_data_label, model, args, postprocess=False):
     if 'f' in args.loss_class:
         # network feature loss
         feat_loss, pull_loss, push_loss = compute_embedding_loss(affinity_feat, I_gt)
-        boundary_loss = comput_boundary_loss(p, affinity_feat, I_gt)
+        boundary_loss = compute_boundary_loss_v2(p, affinity_feat, I_gt)
         loss_dict['feat_loss'] = feat_loss
         loss_dict['boundary_loss'] = boundary_loss
     # if 'n' in args.loss_class:

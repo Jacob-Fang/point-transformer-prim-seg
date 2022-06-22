@@ -54,6 +54,7 @@ class ABCDataset(data.Dataset):
             normals = np.array(hf.get("normals"))
             primitives = np.array(hf.get("prim"))
             primitive_param = np.array(hf.get("T_param"))
+            # boundary = np.array(hf.get("boundary"))
         del hf
         
         if self.augment:
@@ -70,6 +71,7 @@ class ABCDataset(data.Dataset):
         ret_dict['gt_normal'] = normals
         ret_dict['T_gt'] = primitives.astype(int)
         ret_dict['T_param'] = primitive_param
+        # ret_dict['boundary'] = boundary
         
         # set small number primitive as background
         counter = Counter(labels)

@@ -239,9 +239,9 @@ class PrimitivesEmbeddingDGCNGn(nn.Module):
     inside the forward function so that data distributed loss can be made faster.
     """
 
-    def __init__(self, opt, emb_size=50, num_primitives=8, primitives=True, embedding=True, parameters=True, use_boundary=True, mode=0, num_channels=3, nn_nb=80):
+    def __init__(self, emb_size=50, num_primitives=8, primitives=True, embedding=True, parameters=True, use_boundary=True, mode=0, num_channels=3, nn_nb=80):
         super(PrimitivesEmbeddingDGCNGn, self).__init__()
-        self.opt = opt
+        # self.opt = opt
         self.mode = mode
         self.encoder = DGCNNEncoderGn(mode=mode, input_channels=num_channels, nn_nb=nn_nb)
         self.drop = 0.0
@@ -262,7 +262,7 @@ class PrimitivesEmbeddingDGCNGn(nn.Module):
         self.emb_size = emb_size
         self.primitives = primitives
         self.embedding = embedding
-        self.parameters = parameters
+        self.param = parameters
         self.use_boundary = use_boundary
 
         if self.embedding:
@@ -280,15 +280,15 @@ class PrimitivesEmbeddingDGCNGn(nn.Module):
             self.mlp_param_prob2 = torch.nn.Conv1d(256, 22, 1)
             self.bn_param_prob1 = nn.GroupNorm(4, 256)
 
-        if self.mode == 5:
-            self.mlp_normal_prob1 = torch.nn.Conv1d(256, 256, 1)
-            self.mlp_normal_prob2 = torch.nn.Conv1d(256, 3, 1)
-            self.bn_normal_prob1 = nn.GroupNorm(4, 256)
+        # if self.mode == 5:
+        #     self.mlp_normal_prob1 = torch.nn.Conv1d(256, 256, 1)
+        #     self.mlp_normal_prob2 = torch.nn.Conv1d(256, 3, 1)
+        #     self.bn_normal_prob1 = nn.GroupNorm(4, 256)
         
-        if use_boundary:
-            self.mlp_bound_prob1 = torch.nn.Conv1d(256, 256, 1)
-            self.mlp_bound_prob2 = torch.nn.Conv1d(256, 2, 1)
-            self.bn_bound_prob1 = nn.GroupNorm(4, 256)
+        # if use_boundary:
+        #     self.mlp_bound_prob1 = torch.nn.Conv1d(256, 256, 1)
+        #     self.mlp_bound_prob2 = torch.nn.Conv1d(256, 2, 1)
+        #     self.bn_bound_prob1 = nn.GroupNorm(4, 256)
 
  
 
@@ -326,19 +326,19 @@ class PrimitivesEmbeddingDGCNGn(nn.Module):
             x = F.dropout(F.relu(self.bn_prim_prob1(self.mlp_prim_prob1(x_all))), self.drop)
             type_per_point = self.mlp_prim_prob2(x)
 
-            if 'r' in self.opt.loss_class:
-                type_per_point = self.logsoftmax(type_per_point).permute(0, 2, 1)
-            else:
-                type_per_point = type_per_point.permute(0, 2, 1)
+            # if 'r' in self.opt.loss_class:
+            type_per_point = self.logsoftmax(type_per_point).permute(0, 2, 1)
+            # else:
+            #     type_per_point = type_per_point.permute(0, 2, 1)
         
-        if self.mode == 5:
-            x = F.dropout(F.relu(self.bn_normal_prob1(self.mlp_normal_prob1(x_all))), self.drop)
-            normal_per_point = self.mlp_normal_prob2(x).permute(0, 2, 1)
-            normal_norm = torch.norm(normal_per_point, dim=-1,
-                                 keepdim=True).repeat(1, 1, 3) + 1e-12
-            normal_per_point = normal_per_point / normal_norm
+        # if self.mode == 5:
+        #     x = F.dropout(F.relu(self.bn_normal_prob1(self.mlp_normal_prob1(x_all))), self.drop)
+        #     normal_per_point = self.mlp_normal_prob2(x).permute(0, 2, 1)
+        #     normal_norm = torch.norm(normal_per_point, dim=-1,
+        #                          keepdim=True).repeat(1, 1, 3) + 1e-12
+        #     normal_per_point = normal_per_point / normal_norm
        
-        if self.parameters:
+        if self.param:
             x = F.dropout(F.relu(self.bn_param_prob1(self.mlp_param_prob1(x_all))), self.drop)
             param_per_point = self.mlp_param_prob2(x).transpose(1, 2)
             sphere_param = param_per_point[:, :, :4]
@@ -355,45 +355,44 @@ class PrimitivesEmbeddingDGCNGn(nn.Module):
 
             param_per_point = torch.cat([sphere_param, plane_param, cylinder_param, cone_param], dim=2)
             
-        if self.use_boundary:
-            x = F.dropout(F.relu(self.bn_bound_prob1(self.mlp_bound_prob1(x_all))), self.drop)
-            boundary_per_point = self.mlp_bound_prob2(x).permute(0, 2, 1)
+        # if self.use_boundary:
+        #     x = F.dropout(F.relu(self.bn_bound_prob1(self.mlp_bound_prob1(x_all))), self.drop)
+        #     boundary_per_point = self.mlp_bound_prob2(x).permute(0, 2, 1)
 
         
         if self.mode == 5:
-            return embedding, type_per_point, normal_per_point, param_per_point, boundary_per_point, subidx.squeeze(1)
+            return embedding, type_per_point, param_per_point, subidx.squeeze(1)
         else:
-            return embedding, type_per_point, param_per_point, boundary_per_point, subidx.squeeze(1)
+            return embedding, type_per_point, param_per_point, subidx.squeeze(1)
 
 
 class PrimitiveNet(nn.Module):
-    def __init__(self, opt):
+    def __init__(self):
         super(PrimitiveNet, self).__init__()
-        self.opt = opt
+        # self.opt = opt
         
-        input_feature_dim = 3 if self.opt.input_normal else 0
+        # input_feature_dim = 3 if self.opt.input_normal else 0
 
-        if self.opt.backbone == 'DGCNN':
-            self.affinitynet = PrimitivesEmbeddingDGCNGn(
-                                                    opt=opt,
-                                                    emb_size=self.opt.out_dim,
-                                                    num_primitives=10,
-                                                    mode=5,
-                                                    num_channels=6,
-                                                    )
+        # if self.opt.backbone == 'DGCNN':
+        self.affinitynet = PrimitivesEmbeddingDGCNGn(
+                                                emb_size=128,
+                                                num_primitives=10,
+                                                mode=5,
+                                                num_channels=6,
+                                                )
     
     def forward(self, xyz, normal, inds=None, postprocess=False):
 
-        feat_spec_embedding, T_pred, normal_per_point, T_param_pred, boundary_per_point, subidx = self.affinitynet(
+        feat_spec_embedding, T_pred, T_param_pred, subidx = self.affinitynet(
                 xyz.transpose(1, 2).contiguous(),
                 normal.transpose(1, 2).contiguous(),
                 inds=inds,
                 postprocess=postprocess)
 
-        if self.opt.input_normal:
-            return feat_spec_embedding, T_pred, normal_per_point, T_param_pred, boundary_per_point, subidx
-        else:
-            return feat_spec_embedding, T_pred, T_param_pred, boundary_per_point, subidx
+        # if self.opt.input_normal:
+        return feat_spec_embedding, T_pred, T_param_pred, subidx
+        # else:
+        #     return feat_spec_embedding, T_pred, T_param_pred, boundary_per_point, subidx
  
 class PointTransformer_Encoder(nn.Module):
     

@@ -1,7 +1,7 @@
 #!/bin/sh
 
 export PYTHONPATH=./
-eval "$(conda shell.bash hook)"
+# eval "$(conda shell.bash hook)"
 PYTHON=python
 
 TRAIN_CODE=train.py

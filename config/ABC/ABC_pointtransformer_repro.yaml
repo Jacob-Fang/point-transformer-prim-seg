@@ -28,11 +28,11 @@ PARAMETERS:
 
 TRAIN:
   arch: pointtransformer_primitive_seg_repro
-  train_gpu: [4]
+  train_gpu: [3,4]
   sync_bn: False
   workers: 4  # data loader workers
-  batch_size: 22  # batch size for training
-  batch_size_val: 1  # batch size for validation during training, memory and speed tradeoff
+  batch_size: 44  # batch size for training
+  batch_size_val: 2  # batch size for validation during training, memory and speed tradeoff
   base_lr: 0.001
   epochs: 200
   start_epoch: 0
@@ -43,7 +43,7 @@ TRAIN:
   save_freq: 1
   save_path:
   weight:  # path to initial weight (default: none)
-  resume:  # path to latest checkpoint (default: none)
+  resume: /home/fz20/Project/point-transformer-prim-seg/exp/ABC/pointtransformer_repro/model/model_last.pth # path to latest checkpoint (default: none)
   evaluate: True  # evaluate on validation set, extra gpu memory needed and small batch_size_val is recommend
   eval_freq: 1
   is_test: False
